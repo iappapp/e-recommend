@@ -14,6 +14,7 @@ import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 
 @Service
 public class RecommenderService {
@@ -82,6 +83,10 @@ public class RecommenderService {
         MongoCollection<Document> userRecsCollection = mongoClient.getDatabase(Constant.MONGODB_DATABASE).getCollection(Constant.MONGODB_USER_RECS_COLLECTION);
         Document document = userRecsCollection.find(new Document("userId", request.getUserId())).first();
 
+        if (Objects.isNull(document) || Objects.isNull(document.get("recs"))) {
+            return new ArrayList<>();
+        }
+
         List<Recommendation> recommendations = new ArrayList<>();
         ArrayList<Document> recs = document.get("recs", ArrayList.class);
 
@@ -98,6 +103,9 @@ public class RecommenderService {
         MongoCollection<Document> userRecsCollection = mongoClient.getDatabase(Constant.MONGODB_DATABASE).getCollection(Constant.MONGODB_STREAM_RECS_COLLECTION);
         Document document = userRecsCollection.find(new Document("userId", request.getUserId())).first();
 
+        if (Objects.isNull(document) || Objects.isNull(document.get("recs"))) {
+            return new ArrayList<>();
+        }
         List<Recommendation> recommendations = new ArrayList<>();
         ArrayList<Document> recs = document.get("recs", ArrayList.class);
 
