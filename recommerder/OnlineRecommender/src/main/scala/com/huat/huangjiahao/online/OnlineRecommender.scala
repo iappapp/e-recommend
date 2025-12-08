@@ -5,7 +5,6 @@ import com.mongodb.casbah.{MongoClient, MongoClientURI}
 import org.apache.kafka.common.serialization.StringDeserializer
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.SparkSession
-import org.apache.spark.streaming.kafka010.{ConsumerStrategies, KafkaUtils, LocationStrategies}
 import org.apache.spark.streaming.{Seconds, StreamingContext}
 import redis.clients.jedis.Jedis
 
@@ -81,34 +80,50 @@ object OnlineRecommender {
       "group.id" -> "recommender",
       "auto.offset.reset" -> "latest"
     )
+
+    val kafkaBrokers = config("kafka.brokers")
+    val kafkaTopic = config("kafka.topic")
+
     // 创建一个DStream
-    val kafkaStream = KafkaUtils.createDirectStream[String, String](ssc,
-      LocationStrategies.PreferConsistent,
-      ConsumerStrategies.Subscribe[String, String](Array(config("kafka.topic")), kafkaParam)
-    )
+    val kafkaDF = spark.readStream
+      .format("kafka") // 使用内置的 Kafka 数据源
+      .option("kafka.bootstrap.servers", kafkaBrokers)
+      .option("subscribe", kafkaTopic)
+      .option("startingOffsets", "latest")
+      .load()
+
+    import org.apache.spark.sql.functions._
     // 对kafkaStream进行处理，产生评分流，userId|productId|score|timestamp
-    val ratingStream = kafkaStream.map { msg =>
-      var attr = msg.value().split("\\|")
-      (attr(0).toInt, attr(1).toInt, attr(2).toDouble, attr(3).toInt)
-    }
+    val ratingDF = kafkaDF
+      // 提取 value 列，并转换为 String
+      .selectExpr("CAST(value AS STRING) AS value_string", "timestamp")
+      // 分割字符串，生成一个数组列
+      .withColumn("attr", split(col("value_string"), "\\|"))
+      .filter(size(col("attr")) >= 4)
+      // 提取数组元素并转换为对应的类型，生成最终的结构化评分流
+      .select(
+        col("attr").getItem(0).cast("int").as("userId"),
+        col("attr").getItem(1).cast("int").as("productId"),
+        col("attr").getItem(2).cast("double").as("score"),
+        col("attr").getItem(3).cast("int").as("timestamp")
+      )
 
     // 核心算法部分，定义评分流的处理流程
-    ratingStream.foreachRDD {
-      rdds =>
-        rdds.foreach {
-          case (userId, productId, score, timestamp) =>
-            //核心算法流程 1. 从redis里取出当前用户的最近评分，保存成一个数组Array[(productId, score)]
-            val userRecentlyRatings = getUserRecentlyRatings(MAX_USER_RATING_NUM,
-              userId, ConnHelper.jedis)
-            // 2. 从相似度矩阵中获取当前商品最相似的商品列表，作为备选列表，保存成一个数组Array[productId]
-            val candidateProducts = getTopSimProducts(MAX_SIM_PRODUCTS_NUM, productId, userId,
-              simProcutsMatrixBC.value)
-            // 3. 计算每个备选商品的推荐优先级，得到当前用户的实时推荐列表，保存成 Array[(productId, score)]
-            val streamRecs = computeProductScore(candidateProducts, userRecentlyRatings,
-              simProcutsMatrixBC.value)
-            // 4. 把推荐列表保存到mongodb
-            saveDataToMongoDB(userId, streamRecs)
-        }
+    ratingDF.as[(Int, Int, Double, Int)].rdd.foreach {
+      case (userId, productId, score, timestamp) =>
+        // 核心算法流程 1. 从redis里取出当前用户的最近评分
+        val userRecentlyRatings = getUserRecentlyRatings(MAX_USER_RATING_NUM,
+          userId, ConnHelper.jedis)
+        // 2. 从相似度矩阵中获取当前商品最相似的商品列表，作为备选列表，保存成一个数组Array[productId]
+        val candidateProducts = getTopSimProducts(MAX_SIM_PRODUCTS_NUM, productId, userId,
+          simProcutsMatrixBC.value)
+        // 3. 计算每个备选商品的推荐优先级，得到当前用户的实时推荐列表，保存成 Array[(productId, score)]
+        val streamRecs = computeProductScore(candidateProducts, userRecentlyRatings,
+          simProcutsMatrixBC.value)
+        // 4. 把推荐列表保存到mongodb
+        saveDataToMongoDB(userId, streamRecs)
+
+      // ... (其他原有逻辑，如 getTopSimProducts, computeProductScore, saveDataToMongoDB)
     }
 
     // 启动streaming
@@ -122,11 +137,12 @@ object OnlineRecommender {
     * 从redis里获取最近num次评分
     */
 
-  import scala.collection.JavaConversions._
+  import scala.jdk.CollectionConverters._
 
   def getUserRecentlyRatings(num: Int, userId: Int, jedis: Jedis): Array[(Int, Double)] = {
     // 从redis中用户的评分队列里获取评分数据，list键名为uid:USERID，值格式是 PRODUCTID:SCORE
     jedis.lrange("userId:" + userId.toString, 0, num)
+      .asScala
       .map { item =>
         val attr = item.split("\\:")
         (attr(0).trim.toInt, attr(1).trim.toDouble)
@@ -166,8 +182,8 @@ object OnlineRecommender {
       if (simScore > 0.4) { // 按照公式进行加权计算，得到基础评分
         scores += ((candidateProduct, simScore * userRecentlyRating._2))
         if (userRecentlyRating._2 > 3) increMap(candidateProduct) = increMap
-          .getOrDefault(candidateProduct, 0) + 1
-        else decreMap(candidateProduct) = decreMap.getOrDefault(candidateProduct, 0) + 1
+          .getOrElse(candidateProduct, 0) + 1
+        else decreMap(candidateProduct) = decreMap.getOrElse(candidateProduct, 0) + 1
       }
     }
 
@@ -175,8 +191,8 @@ object OnlineRecommender {
     scores.groupBy(_._1).map {
       case (productId, scoreList) =>
         (productId, scoreList.map(_._2).sum / scoreList.length
-          + log(increMap.getOrDefault(productId, 1))
-          - log(decreMap.getOrDefault(productId, 1)))
+          + log(increMap.getOrElse(productId, 1))
+          - log(decreMap.getOrElse(productId, 1)))
     }
       // 返回推荐列表，按照得分排序
       .toArray.sortWith(_._2 > _._2)
