@@ -16,15 +16,15 @@
         <!-- Spark的依赖引入 -->
         <dependency>
             <groupId>org.apache.spark</groupId>
-            <artifactId>spark-core_2.11</artifactId>
+            <artifactId>spark-core_2.13</artifactId>
         </dependency>
         <dependency>
             <groupId>org.apache.spark</groupId>
-            <artifactId>spark-sql_2.11</artifactId>
+            <artifactId>spark-sql_2.13</artifactId>
         </dependency>
         <dependency>
             <groupId>org.apache.spark</groupId>
-            <artifactId>spark-streaming_2.11</artifactId>
+            <artifactId>spark-streaming_2.13</artifactId>
         </dependency>
         <!-- 引入Scala -->
         <dependency>
@@ -42,8 +42,7 @@
         <!-- 用于Spark和MongoDB的对接 -->
         <dependency>
             <groupId>org.mongodb.spark</groupId>
-            <artifactId>mongo-spark-connector_2.11</artifactId>
-            <version>${mongodb-spark.version}</version>
+            <artifactId>mongo-spark-connector_2.12</artifactId>
         </dependency>
 
         <!-- redis -->
@@ -61,7 +60,7 @@
         </dependency>
         <dependency>
             <groupId>org.apache.spark</groupId>
-            <artifactId>spark-streaming-kafka-0-10_2.11</artifactId>
+            <artifactId>spark-sql-kafka-0-10_2.12</artifactId>
             <version>${spark.version}</version>
         </dependency>
 
