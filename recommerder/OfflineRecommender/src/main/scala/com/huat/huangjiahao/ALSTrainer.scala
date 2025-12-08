@@ -12,7 +12,7 @@ object ALSTrainer {
   def main(args: Array[String]): Unit = {
     val config = Map(
       "spark.cores" -> "local[*]",
-      "mongo.uri" -> "mongodb://192.168.3.56:27017/recommender",
+      "mongo.uri" -> "mongodb://tiger.local:27017/recommender",
       "mongo.db" -> "recommender"
     )
     // 创建一个spark config
@@ -26,8 +26,9 @@ object ALSTrainer {
     // 加载数据
     val ratingRDD = spark.read
       .option("uri", mongoConfig.uri)
+      .option("database", mongoConfig.db)
       .option("collection", MONGODB_RATING_COLLECTION)
-      .format("com.mongodb.spark.sql")
+      .format("mongodb")
       .load()
       .as[ProductRating]
       .rdd

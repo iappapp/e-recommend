@@ -1,9 +1,9 @@
 package com.huat.huangjiahao.recommender
 
-import com.mongodb.casbah.commons.MongoDBObject
-import com.mongodb.casbah.{MongoClient, MongoClientURI}
+import com.mongodb.client.MongoClients
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.{DataFrame, SparkSession}
+import org.bson.Document
 
 
 /**
@@ -77,34 +77,37 @@ object DataLoader {
   }
   def storeDataInMongoDB( productDF: DataFrame, ratingDF: DataFrame )(implicit mongoConfig: MongoConfig): Unit ={
     // 新建一个mongodb的连接，客户端
-    val mongoClient = MongoClient( MongoClientURI(mongoConfig.uri) )
+    val mongoClient = MongoClients.create(mongoConfig.uri)
+    var database = mongoClient.getDatabase(mongoConfig.db)
     // 定义要操作的mongodb表，可以理解为 db.Product
-    val productCollection = mongoClient( mongoConfig.db )( MONGODB_PRODUCT_COLLECTION )
-    val ratingCollection = mongoClient( mongoConfig.db )( MONGODB_RATING_COLLECTION )
+    val productCollection = database.getCollection( MONGODB_PRODUCT_COLLECTION )
+    val ratingCollection = database.getCollection( MONGODB_RATING_COLLECTION )
 
     // 如果表已经存在，则删掉
-    productCollection.dropCollection()
-    ratingCollection.dropCollection()
+    productCollection.drop()
+    ratingCollection.drop()
 
     // 将当前数据存入对应的表中
     productDF.write
       .option("uri", mongoConfig.uri)
+      .option("database", mongoConfig.db)
       .option("collection", MONGODB_PRODUCT_COLLECTION)
       .mode("overwrite")
-      .format("com.mongodb.spark.sql")
+      .format("mongodb")
       .save()
 
     ratingDF.write
       .option("uri", mongoConfig.uri)
+      .option("database", mongoConfig.db)
       .option("collection", MONGODB_RATING_COLLECTION)
       .mode("overwrite")
-      .format("com.mongodb.spark.sql")
+      .format("mongodb")
       .save()
 
     // 对表创建索引
-    productCollection.createIndex( MongoDBObject( "productId" -> 1 ) )
-    ratingCollection.createIndex( MongoDBObject( "productId" -> 1 ) )
-    ratingCollection.createIndex( MongoDBObject( "userId" -> 1 ) )
+    productCollection.createIndex( new Document( "productId", 1 ) )
+    ratingCollection.createIndex( new Document( "productId", 1 ) )
+    ratingCollection.createIndex( new Document( "userId", 1 ) )
 
     mongoClient.close()
   }

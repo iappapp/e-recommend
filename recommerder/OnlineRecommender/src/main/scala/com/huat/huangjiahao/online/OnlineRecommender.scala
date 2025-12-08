@@ -1,19 +1,26 @@
 package com.huat.huangjiahao.online
 
-import com.mongodb.casbah.commons.MongoDBObject
-import com.mongodb.casbah.{MongoClient, MongoClientURI}
+import com.mongodb.client.MongoClients
+import com.mongodb.client.model.Filters
 import org.apache.kafka.common.serialization.StringDeserializer
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.streaming.{Seconds, StreamingContext}
+import org.bson.Document
 import redis.clients.jedis.Jedis
+import com.mongodb.client.model.Filters.eq
+
+import scala.collection.mutable.ListBuffer
+import scala.jdk.CollectionConverters._
+import scala.collection.convert.ImplicitConversions.`iterable AsScalaIterable`
 
 
 // 定义一个连接助手对象，建立到redis和mongodb的连接
 object ConnHelper extends Serializable {
+  val host = "192.168.1.100"
   // 懒变量定义，使用的时候才初始化
-  lazy val jedis = new Jedis("192.168.1.100")
-  lazy val mongoClient = MongoClient(MongoClientURI("mongodb://192.168.1.100:27017/recommender"))
+  lazy val jedis = new Jedis(host)
+  lazy val mongoClient = MongoClients.create((s"mongodb://$host:27017/recommender"))
 }
 
 case class MongoConfig(uri: String, db: String)
@@ -156,14 +163,42 @@ object OnlineRecommender {
                        (implicit mongoConfig: MongoConfig): Array[Int] = {
     // 从广播变量相似度矩阵中拿到当前商品的相似度列表
     val allSimProducts = simProducts(productId).toArray
+    val database = ConnHelper.mongoClient.getDatabase(mongoConfig.db)
     // 获得用户已经评分过的商品，过滤掉，排序输出
-    val ratingCollection = ConnHelper.mongoClient(mongoConfig.db)(MONGODB_RATING_COLLECTION)
-    val ratingExist = ratingCollection.find(MongoDBObject("userId" -> userId))
-      .toArray // 只需要productId
-      .map { item => item.get("productId").toString.toInt }
-    // 从所有的相似商品中进行过滤
-    allSimProducts.filter(x => !ratingExist.contains(x._1))
-      .sortWith(_._2 > _._2).take(num).map(x => x._1)
+    val ratingCollection = database.getCollection(MONGODB_RATING_COLLECTION)
+
+    val filter = Filters.eq("userId", userId)
+
+    // 2) 查询并塞入 Scala Set[Int]
+    // 注意：Document 中 productId 可能是 Int 或 Long，下面做了兼容处理
+    val ratingExist: Set[Int] = {
+      val it = ratingCollection.find(filter).iterator()
+      it.asScala.map { doc =>
+        // 尝试按 Int 取；若存的是 Long，则转为 Int
+        val value = Option(doc.get("productId")).orNull
+        if (value == null) {
+          throw new IllegalStateException("document has no productId field: " + doc)
+        } else {
+          // 常见两种情况：Integer 或 Long
+          value match {
+            case i: java.lang.Integer => i.intValue()
+            case l: java.lang.Long    => l.intValue()
+            case other =>
+              // 兜底：尝试 toString -> Int（不推荐长期使用，便于迁移）
+              other.toString.toInt
+          }
+        }
+      }.toSet
+    }
+
+    // 3) 过滤、排序、取前 num
+    val result: Array[Int] = allSimProducts
+      .filterNot { case (pid, _) => ratingExist.contains(pid) }
+      .sortBy(-_._2)
+      .take(num)
+      .map(_._1)
+
+    result
   }
 
   // 计算每个备选商品的推荐得分
@@ -217,11 +252,24 @@ object OnlineRecommender {
 
   // 写入mongodb
   def saveDataToMongoDB(userId: Int, streamRecs: Array[(Int, Double)])(implicit mongoConfig: MongoConfig): Unit = {
-    val streamRecsCollection = ConnHelper.mongoClient(mongoConfig.db)(STREAM_RECS)
+    var database = ConnHelper.mongoClient.getDatabase(mongoConfig.db)
+    val streamRecsCollection = database.getCollection(STREAM_RECS)
     // 按照userId查询并更新
-    streamRecsCollection.findAndRemove(MongoDBObject("userId" -> userId))
-    streamRecsCollection.insert(MongoDBObject("userId" -> userId,
-      "recs" -> streamRecs.map(x => MongoDBObject("productId" -> x._1, "score" -> x._2))))
+    var query = Filters.eq("userId", userId)
+    streamRecsCollection.deleteMany(query)
+
+    import scala.jdk.CollectionConverters._
+
+    val recDocs = streamRecs.map { case (productId, score) =>
+      new Document()
+        .append("productId", productId)
+        .append("score", score)
+    }
+
+    val doc = new Document()
+      .append("userId",userId)
+      .append( "recs", recDocs)
+    streamRecsCollection.insertOne(doc)
   }
 
 }

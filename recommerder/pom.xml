@@ -56,7 +56,7 @@
             </dependency>
             <dependency>
                 <groupId>org.mongodb.spark</groupId>
-                <artifactId>mongo-spark-connector_2.12</artifactId>
+                <artifactId>mongo-spark-connector_2.13</artifactId>
                 <version>${mongodb-spark.version}</version>
             </dependency>
         </dependencies>

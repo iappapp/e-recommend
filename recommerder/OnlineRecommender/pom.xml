@@ -32,17 +32,10 @@
             <artifactId>scala-library</artifactId>
         </dependency>
 
-        <!-- 加入MongoDB的驱动 -->
-        <!-- 用于代码方式连接MongoDB -->
-        <dependency>
-            <groupId>org.mongodb</groupId>
-            <artifactId>casbah-core_2.11</artifactId>
-            <version>${casbah.version}</version>
-        </dependency>
         <!-- 用于Spark和MongoDB的对接 -->
         <dependency>
             <groupId>org.mongodb.spark</groupId>
-            <artifactId>mongo-spark-connector_2.12</artifactId>
+            <artifactId>mongo-spark-connector_2.13</artifactId>
         </dependency>
 
         <!-- redis -->
@@ -64,6 +57,27 @@
             <version>${spark.version}</version>
         </dependency>
 
+        <!--<dependency>
+            <groupId>org.mongodb.scala</groupId>
+            <artifactId>mongo-scala-driver_2.13</artifactId>
+            <version>4.11.1</version>
+            <exclusions>
+                <exclusion>
+                    <groupId>org.scala-lang</groupId>
+                    <artifactId>scala-library</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.scala-lang</groupId>
+                    <artifactId>scala-reflect</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>-->
+
+        <dependency>
+            <groupId>org.mongodb</groupId>
+            <artifactId>mongodb-driver-sync</artifactId>
+            <version>4.8.1</version>
+        </dependency>
     </dependencies>
 
 </project>

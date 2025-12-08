@@ -57,8 +57,9 @@ object OfflineRecommender {
     // 加载数据
     val ratingRDD = spark.read
       .option("uri", mongoConfig.uri)
+      .option("database", mongoConfig.db)
       .option("collection", MONGODB_RATING_COLLECTION)
-      .format("com.mongodb.spark.sql")
+      .format("mongodb")
       .load()
       .as[ProductRating]
       .rdd
@@ -105,14 +106,16 @@ object OfflineRecommender {
       .toDF()
     val userResult: DataFrameWriter[Row] = userRecs.write
       .option("uri", mongoConfig.uri)
+      .option("database", mongoConfig.db)
       .option("collection", USER_RECS)
       .mode("overwrite")
-      .format("com.mongodb.spark.sql")
+      .format("mongodb")
     val productResulst: DataFrameWriter[Row] = productRecs.write
       .option("uri", mongoConfig.uri)
+      .option("database", mongoConfig.db)
       .option("collection", PRODUCT_RECS)
       .mode("overwrite")
-      .format("com.mongodb.spark.sql")
+      .format("mongodb")
     //    Thread.sleep(20000)
     val startTime2: Long = System.currentTimeMillis()
     userResult.save()

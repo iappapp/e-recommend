@@ -22,8 +22,11 @@ object StatisticsRecommender {
   val AVERAGE_PRODUCTS = "AverageProducts"
 
   def storeDFInMongoDB(df: DataFrame, collection_name: String)(implicit mongoConfig: MongoConfig): Unit = {
-    df.write.option("uri", mongoConfig.uri).option("collection", collection_name).mode("overwrite")
-      .format("com.mongodb.spark.sql").save()
+    df.write.option("uri", mongoConfig.uri)
+      .option("database", mongoConfig.db)
+      .option("collection", collection_name)
+      .mode("overwrite")
+      .format("mongodb").save()
   }
 
   def main(args: Array[String]): Unit = {
@@ -44,8 +47,9 @@ object StatisticsRecommender {
     // 加载数据
     val ratingDF = spark.read
       .option("uri", mongoConfig.uri)
+      .option("database", mongoConfig.db)
       .option("collection", MONGODB_RATING_COLLECTION)
-      .format("com.mongodb.spark.sql")
+      .format("mongodb")
       .load()
       .as[Rating]
       .toDF()
