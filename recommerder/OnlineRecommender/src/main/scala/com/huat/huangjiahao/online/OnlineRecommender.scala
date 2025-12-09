@@ -4,12 +4,14 @@ import com.mongodb.client.MongoClients
 import com.mongodb.client.model.Filters
 import org.apache.kafka.common.serialization.StringDeserializer
 import org.apache.spark.SparkConf
+import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.streaming.Trigger
 import org.apache.spark.streaming.{Seconds, StreamingContext}
 import org.bson.Document
 import redis.clients.jedis.Jedis
-import com.mongodb.client.model.Filters.eq
 
+import java.util.concurrent.TimeUnit
 import scala.collection.mutable.ListBuffer
 import scala.jdk.CollectionConverters._
 import scala.collection.convert.ImplicitConversions.`iterable AsScalaIterable`
@@ -17,9 +19,10 @@ import scala.collection.convert.ImplicitConversions.`iterable AsScalaIterable`
 
 // 定义一个连接助手对象，建立到redis和mongodb的连接
 object ConnHelper extends Serializable {
-  val host = "192.168.1.100"
+  val host = "172.16.26.152"
   // 懒变量定义，使用的时候才初始化
   lazy val jedis = new Jedis(host)
+  jedis.auth("12345678")
   lazy val mongoClient = MongoClients.create((s"mongodb://$host:27017/recommender"))
 }
 
@@ -34,6 +37,8 @@ case class UserRecs(userId: Int, recs: Seq[Recommendation])
 // 定义商品相似度列表
 case class ProductRecs(productId: Int, recs: Seq[Recommendation])
 
+case class Rating(userId: Int, productId: Int, score: Double, timestamp: Int)
+
 /**
   * 实时推荐
   */
@@ -45,6 +50,10 @@ object OnlineRecommender {
 
   val MAX_USER_RATING_NUM = 20
   val MAX_SIM_PRODUCTS_NUM = 20
+
+  private var simProcutsMatrixBC: Broadcast[scala.collection.Map[Int, scala.collection.immutable.Map[Int, Double]]] = _
+
+  private var mongoConfig: MongoConfig = _
 
   def main(args: Array[String]): Unit = {
     val config = Map(
@@ -58,16 +67,17 @@ object OnlineRecommender {
     val sparkConf = new SparkConf().setMaster(config("spark.cores")).setAppName("OnlineRecommender")
     val spark = SparkSession.builder().config(sparkConf).getOrCreate()
     val sc = spark.sparkContext
-    val ssc = new StreamingContext(sc, Seconds(2))
 
     import spark.implicits._
     implicit val mongoConfig = MongoConfig(config("mongo.uri"), config("mongo.db"))
+    OnlineRecommender.mongoConfig = mongoConfig
 
     // 加载数据，相似度矩阵，广播出去
     val simProductsMatrix = spark.read
       .option("uri", mongoConfig.uri)
+      .option("database", mongoConfig.db)
       .option("collection", PRODUCT_RECS)
-      .format("com.mongodb.spark.sql")
+      .format("mongodb")
       .load()
       .as[ProductRecs]
       .rdd
@@ -77,29 +87,33 @@ object OnlineRecommender {
     }
       .collectAsMap()
     // 定义广播变量
-    val simProcutsMatrixBC = sc.broadcast(simProductsMatrix)
+    OnlineRecommender.simProcutsMatrixBC = sc.broadcast(simProductsMatrix)
 
     // 创建kafka配置参数
     val kafkaParam = Map(
-      "bootstrap.servers" -> "192.168.1.100:9092",
+      "bootstrap.servers" -> "172.16.26.152:29092,172.16.26.152:39092,172.16.26.152:49092",
       "key.deserializer" -> classOf[StringDeserializer],
       "value.deserializer" -> classOf[StringDeserializer],
       "group.id" -> "recommender",
       "auto.offset.reset" -> "latest"
     )
 
-    val kafkaBrokers = config("kafka.brokers")
-    val kafkaTopic = config("kafka.topic")
+    val kafkaBrokers = kafkaParam("bootstrap.servers").toString
+    val kafkaTopic = config("kafka.topic").toString
 
+    import org.apache.spark.sql.functions._
     // 创建一个DStream
     val kafkaDF = spark.readStream
-      .format("kafka") // 使用内置的 Kafka 数据源
+      // 使用内置的 Kafka 数据源
+      .format("kafka")
       .option("kafka.bootstrap.servers", kafkaBrokers)
       .option("subscribe", kafkaTopic)
+      .option("kafka.group.id", "recommender")
       .option("startingOffsets", "latest")
       .load()
 
-    import org.apache.spark.sql.functions._
+    kafkaDF.printSchema()
+
     // 对kafkaStream进行处理，产生评分流，userId|productId|score|timestamp
     val ratingDF = kafkaDF
       // 提取 value 列，并转换为 String
@@ -113,10 +127,10 @@ object OnlineRecommender {
         col("attr").getItem(1).cast("int").as("productId"),
         col("attr").getItem(2).cast("double").as("score"),
         col("attr").getItem(3).cast("int").as("timestamp")
-      )
+      ).as[Rating]
 
     // 核心算法部分，定义评分流的处理流程
-    ratingDF.as[(Int, Int, Double, Int)].rdd.foreach {
+    /*ratingDF.as[(Int, Int, Double, Int)].rdd.foreach {
       case (userId, productId, score, timestamp) =>
         // 核心算法流程 1. 从redis里取出当前用户的最近评分
         val userRecentlyRatings = getUserRecentlyRatings(MAX_USER_RATING_NUM,
@@ -130,14 +144,22 @@ object OnlineRecommender {
         // 4. 把推荐列表保存到mongodb
         saveDataToMongoDB(userId, streamRecs)
 
-      // ... (其他原有逻辑，如 getTopSimProducts, computeProductScore, saveDataToMongoDB)
-    }
+        // (其他原有逻辑，如 getTopSimProducts, computeProductScore, saveDataToMongoDB)
+    }*/
+
+    ratingDF.writeStream
+      // 使用 foreachBatch 将每个微批次的 DataFrame 传递给自定义函数
+      .foreachBatch(processRatingsBatch _)
+      // 必须设置一个检查点路径，用于容错和记录偏移量
+      .option("checkpointLocation", "./checkpoint/dir")
+      // 定义触发间隔，例如每隔 2 秒检查一次新数据
+      .trigger(Trigger.ProcessingTime(2, TimeUnit.SECONDS))
+      // 启动流查询，返回一个 StreamingQuery 对象
+      .start()
+      .awaitTermination()
 
     // 启动streaming
-    ssc.start()
     println("streaming started!")
-    ssc.awaitTermination()
-
   }
 
   /**
@@ -160,10 +182,10 @@ object OnlineRecommender {
   // 获取当前商品的相似列表，并过滤掉用户已经评分过的，作为备选列表
   def getTopSimProducts(num: Int, productId: Int, userId: Int,
                         simProducts: scala.collection.Map[Int, scala.collection.immutable.Map[Int, Double]])
-                       (implicit mongoConfig: MongoConfig): Array[Int] = {
+                       : Array[Int] = {
     // 从广播变量相似度矩阵中拿到当前商品的相似度列表
     val allSimProducts = simProducts(productId).toArray
-    val database = ConnHelper.mongoClient.getDatabase(mongoConfig.db)
+    val database = ConnHelper.mongoClient.getDatabase(this.mongoConfig.db)
     // 获得用户已经评分过的商品，过滤掉，排序输出
     val ratingCollection = database.getCollection(MONGODB_RATING_COLLECTION)
 
@@ -251,8 +273,8 @@ object OnlineRecommender {
   }
 
   // 写入mongodb
-  def saveDataToMongoDB(userId: Int, streamRecs: Array[(Int, Double)])(implicit mongoConfig: MongoConfig): Unit = {
-    var database = ConnHelper.mongoClient.getDatabase(mongoConfig.db)
+  def saveDataToMongoDB(userId: Int, streamRecs: Array[(Int, Double)]): Unit = {
+    var database = ConnHelper.mongoClient.getDatabase(this.mongoConfig.db)
     val streamRecsCollection = database.getCollection(STREAM_RECS)
     // 按照userId查询并更新
     var query = Filters.eq("userId", userId)
@@ -272,4 +294,42 @@ object OnlineRecommender {
     streamRecsCollection.insertOne(doc)
   }
 
+  /**
+   * 核心算法流程：计算实时推荐并保存到 MongoDB。
+   * @param batchDF 当前微批次的评分数据 (Dataset[Rating])
+   * @param batchId 当前微批次的 ID
+   */
+  def processRatingsBatch(batchDF: org.apache.spark.sql.Dataset[Rating], batchId: Long): Unit = {
+
+    // 检查当前批次是否有数据，避免处理空批次
+    if (!batchDF.isEmpty) {
+      println(s"Processing Batch ID: $batchId, Count: ${batchDF.count()}")
+
+      // 转换为 RDD 并使用 foreach (在 driver 端运行一次，然后任务分发给 executor)
+      batchDF.rdd.foreachPartition { ratingsPartition =>
+        // ratingsPartition 是 Iterator[Rating]，代表当前分区的所有评分
+
+        ratingsPartition.foreach { rating =>
+          // 1. 从 redis 里取出当前用户的最近评分
+          val userRecentlyRatings = getUserRecentlyRatings(
+            // 假设 ConnHelper 是正确的单例/连接获取机制
+            MAX_USER_RATING_NUM, rating.userId, ConnHelper.jedis
+          )
+
+          // 2. 从相似度矩阵中获取当前商品最相似的商品列表
+          val candidateProducts = getTopSimProducts(MAX_SIM_PRODUCTS_NUM, rating.productId,
+            rating.userId, simProcutsMatrixBC.value, // 广播变量
+          )
+
+          // 3. 计算推荐优先级，得到实时推荐列表
+          val streamRecs = computeProductScore(candidateProducts, userRecentlyRatings,
+            simProcutsMatrixBC.value
+          )
+
+          // 4. 把推荐列表保存到 mongodb
+          saveDataToMongoDB(rating.userId, streamRecs)
+        }
+      }
+    }
+  }
 }

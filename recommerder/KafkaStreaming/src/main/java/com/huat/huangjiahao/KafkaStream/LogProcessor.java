@@ -25,10 +25,6 @@ public class LogProcessor implements Processor<byte[], byte[]> {
         }
     }
 
-    @Override
-    public void punctuate(long l) {
-
-    }
 
     @Override
     public void close() {
