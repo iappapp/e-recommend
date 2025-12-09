@@ -3,3 +3,5 @@
 businessServer/target
 
 recommerder/*/target
+
+docker/kafka/*
